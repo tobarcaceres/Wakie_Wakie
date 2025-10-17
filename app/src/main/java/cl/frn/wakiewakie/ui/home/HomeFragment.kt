@@ -39,6 +39,7 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.ArrayDeque
 import kotlin.math.hypot
+import androidx.core.net.toUri
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
@@ -309,7 +310,8 @@ class HomeFragment : Fragment() {
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
-                    setDataSource(requireContext(), android.net.Uri.parse("android.resource://${requireContext().packageName}/$resId"))
+                    setDataSource(requireContext(),
+                        "android.resource://${requireContext().packageName}/$resId".toUri())
                     isLooping = true
                     prepare()
                     start()
