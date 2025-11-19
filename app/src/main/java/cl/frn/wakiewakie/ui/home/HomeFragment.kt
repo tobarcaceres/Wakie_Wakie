@@ -39,6 +39,9 @@ import java.util.concurrent.ScheduledFuture
 import java.util.concurrent.TimeUnit
 import java.util.ArrayDeque
 import kotlin.math.hypot
+import androidx.core.net.toUri
+import cl.frn.wakiewakie.DrowsinessState
+import cl.frn.wakiewakie.DrowsinessLogger
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
@@ -47,8 +50,10 @@ class HomeFragment : Fragment() {
     private var faceLandmarker: FaceLandmarker? = null
     private var eyeOpenThreshold: Float = 0.05f
     // Detección mejorada
-    private enum class DrowsinessState { AWAKE, EYES_CLOSED, YAWNING, ASLEEP }
     private var currentState = DrowsinessState.AWAKE
+
+    // Sistema de logging - usar singleton
+    private val drowsinessLogger = DrowsinessLogger.getInstance()
 
     // Rolling windows (timestamps in ms)
     private val closedWindow: ArrayDeque<Long> = ArrayDeque()
@@ -86,6 +91,10 @@ class HomeFragment : Fragment() {
     ): View {
         _binding = FragmentHomeBinding.inflate(inflater, container, false)
         cameraExecutor = Executors.newSingleThreadExecutor()
+
+        // Inicializar el logger singleton con el contexto
+        drowsinessLogger.initialize(requireContext())
+
         initFaceLandmarker()
         requestCameraPermission()
 
@@ -110,129 +119,160 @@ class HomeFragment : Fragment() {
     }
 
     private val onFaceResult: (FaceLandmarkerResult, MPImage) -> Unit = { result, inputImage ->
-        // Procesar la primera cara detectada
-        val first = result.faceLandmarks().firstOrNull()
-        if (first != null) {
-            val landmarks = first
-            val ear = computeEAR(landmarks)
-            val mar = computeMAR(landmarks)
-            val now = System.currentTimeMillis()
+        // Verificar que el binding no sea null antes de procesar
+        if (_binding != null) {
+            // Procesar la primera cara detectada
+            val first = result.faceLandmarks().firstOrNull()
+            if (first != null) {
+                val landmarks = first
+                val ear = computeEAR(landmarks)
+                val mar = computeMAR(landmarks)
+                val now = System.currentTimeMillis()
 
-            // actualizar ventanas temporales (por compatibilidad)
-            if (ear < EAR_THRESHOLD) {
-                closedWindow.addLast(now)
-            } else {
-                // no clear here; keep for time-based checks
-            }
-
-            if (mar > MAR_THRESHOLD) {
-                yawnWindow.addLast(now)
-            }
-            // limpiamos timestamps antiguos
-            while (closedWindow.isNotEmpty() && now - closedWindow.first() > EAR_CLOSED_MS) closedWindow.removeFirst()
-            while (yawnWindow.isNotEmpty() && now - yawnWindow.first() > MAR_YAWN_MS) yawnWindow.removeFirst()
-            // limpiamos timestamps antiguos
-            while (closedWindow.isNotEmpty() && now - closedWindow.first() > EAR_CLOSED_MS) closedWindow.removeFirst()
-            while (yawnWindow.isNotEmpty() && now - yawnWindow.first() > MAR_YAWN_MS) yawnWindow.removeFirst()
-
-            // lógica por frames: detectar ojos cerrados consecutivos y bloquear estado ASLEEP
-            val eyeClosed = ear < EAR_THRESHOLD
-            val yawning = mar > MAR_THRESHOLD
-
-            if (!asleepLocked) {
-                if (yawning) {
-                    // bostezando: reset closed frames
-                    consecutiveClosedFrames = 0
-                    consecutiveOpenFrames = 0
-                } else if (eyeClosed) {
-                    consecutiveClosedFrames++
-                    consecutiveOpenFrames = 0
+                // actualizar ventanas temporales (por compatibilidad)
+                if (ear < EAR_THRESHOLD) {
+                    closedWindow.addLast(now)
                 } else {
-                    consecutiveClosedFrames = 0
-                    consecutiveOpenFrames++
+                    // no clear here; keep for time-based checks
                 }
 
-                // transición por frames a ASLEEP
-                if (consecutiveClosedFrames >= CLOSED_FRAMES_THRESHOLD && !yawning) {
-                    // entrar a estado dormido y bloquear
-                    asleepLocked = true
-                    asleepFrameCount = consecutiveClosedFrames
-                    currentState = DrowsinessState.ASLEEP
-                    activity?.runOnUiThread {
-                        binding.textHome.text = "Dormido / Somnolencia profunda"
-                        startAlarm()
+                if (mar > MAR_THRESHOLD) {
+                    yawnWindow.addLast(now)
+                }
+                // limpiamos timestamps antiguos
+                while (closedWindow.isNotEmpty() && now - closedWindow.first() > EAR_CLOSED_MS) closedWindow.removeFirst()
+                while (yawnWindow.isNotEmpty() && now - yawnWindow.first() > MAR_YAWN_MS) yawnWindow.removeFirst()
+                // limpiamos timestamps antiguos
+                while (closedWindow.isNotEmpty() && now - closedWindow.first() > EAR_CLOSED_MS) closedWindow.removeFirst()
+                while (yawnWindow.isNotEmpty() && now - yawnWindow.first() > MAR_YAWN_MS) yawnWindow.removeFirst()
+
+                // lógica por frames: detectar ojos cerrados consecutivos y bloquear estado ASLEEP
+                val eyeClosed = ear < EAR_THRESHOLD
+                val yawning = mar > MAR_THRESHOLD
+
+                if (!asleepLocked) {
+                    if (yawning) {
+                        // bostezando: reset closed frames
+                        consecutiveClosedFrames = 0
+                        consecutiveOpenFrames = 0
+                    } else if (eyeClosed) {
+                        consecutiveClosedFrames++
+                        consecutiveOpenFrames = 0
+                    } else {
+                        consecutiveClosedFrames = 0
+                        consecutiveOpenFrames++
                     }
-                }
-            } else {
-                // ya está bloqueado en ASLEEP: contamos frames y solo permitimos desbloquear tras suficiente apertura
-                asleepFrameCount++
-                if (!eyeClosed) {
-                    consecutiveOpenFrames++
-                } else {
-                    consecutiveOpenFrames = 0
-                }
-                if (consecutiveOpenFrames >= WAKE_FRAMES_THRESHOLD) {
-                    // desbloquear
-                    asleepLocked = false
-                    asleepFrameCount = 0
-                    consecutiveClosedFrames = 0
-                    consecutiveOpenFrames = 0
-                    currentState = DrowsinessState.AWAKE
-                    activity?.runOnUiThread {
-                        binding.textHome.text = "Despierto"
-                        stopAlarm()
-                    }
-                } else {
-                    // mantener el estado dormido en la UI
-                    activity?.runOnUiThread {
-                        binding.textHome.text = "Dormido / Somnolencia profunda (frames: %d)".format(asleepFrameCount)
-                    }
-                }
-            }
 
-            // decidir estado
-            // Show EAR/MAR values on the UI for tuning
-            activity?.runOnUiThread {
-                val earText = "EAR: %.3f".format(ear)
-                val marText = "MAR: %.3f".format(mar)
-                binding.textEyeThreshold.text = "Umbral EAR: %.4f | %s | %s".format(EAR_THRESHOLD, earText, marText)
-            }
+                    // transición por frames a ASLEEP
+                    if (consecutiveClosedFrames >= CLOSED_FRAMES_THRESHOLD && !yawning) {
+                        // entrar a estado dormido y bloquear
+                        asleepLocked = true
+                        asleepFrameCount = consecutiveClosedFrames
 
-            // Si no está bloqueado y no acabamos de entrar en ASLEEP por frames, actualizamos estados normales
-            if (!asleepLocked) {
-                val newState = when {
-                    // time-based fallback
-                    closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_CLOSED_MS -> DrowsinessState.ASLEEP
-                    closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_EYE_CLOSED_MS -> DrowsinessState.EYES_CLOSED
-                    yawnWindow.isNotEmpty() && now - (yawnWindow.firstOrNull() ?: now) <= MAR_YAWN_MS -> DrowsinessState.YAWNING
-                    else -> DrowsinessState.AWAKE
-                }
+                        // Registrar cambio de estado a ASLEEP por frames
+                        if (currentState != DrowsinessState.ASLEEP) {
+                            drowsinessLogger.logStateChangeSync(DrowsinessState.ASLEEP, ear, mar)
+                        }
 
-                if (newState != currentState) {
-                    currentState = newState
-                    activity?.runOnUiThread {
-                        when (currentState) {
-                            DrowsinessState.AWAKE -> {
-                                binding.textHome.text = "Despierto"
-                                stopAlarm()
-                            }
-                            DrowsinessState.EYES_CLOSED -> {
-                                binding.textHome.text = "Ojos cerrados (breve)"
-                            }
-                            DrowsinessState.YAWNING -> {
-                                binding.textHome.text = "Bostezo detectado"
-                            }
-                            DrowsinessState.ASLEEP -> {
-                                // note: frames-based ASLEEP handled above; keep fallback
+                        currentState = DrowsinessState.ASLEEP
+                        activity?.runOnUiThread {
+                            // Verificar binding antes de actualizar UI
+                            _binding?.let { binding ->
                                 binding.textHome.text = "Dormido / Somnolencia profunda"
-                                startAlarm()
+                            }
+                            startAlarm()
+                        }
+                    }
+                } else {
+                    // ya está bloqueado en ASLEEP: contamos frames y solo permitimos desbloquear tras suficiente apertura
+                    asleepFrameCount++
+                    if (!eyeClosed) {
+                        consecutiveOpenFrames++
+                    } else {
+                        consecutiveOpenFrames = 0
+                    }
+                    if (consecutiveOpenFrames >= WAKE_FRAMES_THRESHOLD) {
+                        // desbloquear
+                        asleepLocked = false
+                        asleepFrameCount = 0
+                        consecutiveClosedFrames = 0
+                        consecutiveOpenFrames = 0
+
+                        // Registrar cambio de estado a AWAKE cuando despierta
+                        if (currentState != DrowsinessState.AWAKE) {
+                            drowsinessLogger.logStateChangeSync(DrowsinessState.AWAKE, ear, mar)
+                        }
+
+                        currentState = DrowsinessState.AWAKE
+                        activity?.runOnUiThread {
+                            // Verificar binding antes de actualizar UI
+                            _binding?.let { binding ->
+                                binding.textHome.text = "Despierto"
+                            }
+                            stopAlarm()
+                        }
+                    } else {
+                        // mantener el estado dormido en la UI
+                        activity?.runOnUiThread {
+                            // Verificar binding antes de actualizar UI
+                            _binding?.let { binding ->
+                                binding.textHome.text = "Dormido / Somnolencia profunda (frames: %d)".format(asleepFrameCount)
+                            }
+                        }
+                    }
+                }
+
+                // decidir estado
+                // Show EAR/MAR values on the UI for tuning
+                activity?.runOnUiThread {
+                    // Verificar binding antes de actualizar UI
+                    _binding?.let { binding ->
+                        val earText = "EAR: %.3f".format(ear)
+                        val marText = "MAR: %.3f".format(mar)
+                        binding.textEyeThreshold.text = "Umbral EAR: %.4f | %s | %s".format(EAR_THRESHOLD, earText, marText)
+                    }
+                }
+
+                // Si no está bloqueado y no acabamos de entrar en ASLEEP por frames, actualizamos estados normales
+                if (!asleepLocked) {
+                    val newState = when {
+                        // time-based fallback
+                        closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_CLOSED_MS -> DrowsinessState.ASLEEP
+                        closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_EYE_CLOSED_MS -> DrowsinessState.EYES_CLOSED
+                        yawnWindow.isNotEmpty() && now - (yawnWindow.firstOrNull() ?: now) <= MAR_YAWN_MS -> DrowsinessState.YAWNING
+                        else -> DrowsinessState.AWAKE
+                    }
+
+                    if (newState != currentState) {
+                        // Registrar cambio de estado con EAR y MAR
+                        drowsinessLogger.logStateChangeSync(newState, ear, mar)
+
+                        currentState = newState
+                        activity?.runOnUiThread {
+                            // Verificar binding antes de actualizar UI
+                            _binding?.let { binding ->
+                                when (currentState) {
+                                    DrowsinessState.AWAKE -> {
+                                        binding.textHome.text = "Despierto"
+                                        stopAlarm()
+                                    }
+                                    DrowsinessState.EYES_CLOSED -> {
+                                        binding.textHome.text = "Ojos cerrados (breve)"
+                                    }
+                                    DrowsinessState.YAWNING -> {
+                                        binding.textHome.text = "Bostezo detectado"
+                                    }
+                                    DrowsinessState.ASLEEP -> {
+                                        // note: frames-based ASLEEP handled above; keep fallback
+                                        binding.textHome.text = "Dormido / Somnolencia profunda"
+                                        startAlarm()
+                                    }
+                                }
                             }
                         }
                     }
                 }
             }
-
-            
         }
     }
 
@@ -309,7 +349,8 @@ class HomeFragment : Fragment() {
                             .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
                             .build()
                     )
-                    setDataSource(requireContext(), android.net.Uri.parse("android.resource://${requireContext().packageName}/$resId"))
+                    setDataSource(requireContext(),
+                        "android.resource://${requireContext().packageName}/$resId".toUri())
                     isLooping = true
                     prepare()
                     start()
@@ -435,5 +476,22 @@ class HomeFragment : Fragment() {
         cameraExecutor.shutdown()
         // cleanup audio
         stopAlarm()
+    }
+
+    // Métodos públicos para acceder al sistema de logging
+    fun getDrowsinessLog(): String {
+        return drowsinessLogger.getFormattedLog()
+    }
+
+    fun getDrowsinessLogEntries(): List<cl.frn.wakiewakie.DrowsinessLogEntry> {
+        return drowsinessLogger.getLogEntries()
+    }
+
+    suspend fun clearDrowsinessLog() {
+        drowsinessLogger.clearLog()
+    }
+
+    fun getEntriesForState(state: DrowsinessState): List<cl.frn.wakiewakie.DrowsinessLogEntry> {
+        return drowsinessLogger.getEntriesForState(state)
     }
 }

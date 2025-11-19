@@ -10,7 +10,7 @@ android {
 
     defaultConfig {
         applicationId = "cl.frn.wakiewakie"
-        minSdk = 24
+        minSdk = 26
         targetSdk = 35
         versionCode = 1
         versionName = "1.0"
@@ -47,7 +47,7 @@ dependencies {
     implementation(libs.androidx.camera.camera2)
     implementation(libs.camera.lifecycle)
     implementation(libs.androidx.camera.view)
-
+    implementation(libs.gson)
     implementation(libs.tensorflow.lite.task.vision)
     implementation(libs.tensorflow.lite.metadata)
     implementation(libs.androidx.core.ktx)
@@ -59,6 +59,7 @@ dependencies {
     implementation(libs.androidx.navigation.fragment.ktx)
     implementation(libs.androidx.navigation.ui.ktx)
     implementation("com.google.mediapipe:tasks-vision:0.10.29")
+    implementation("androidx.cardview:cardview:1.0.0")
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)
     androidTestImplementation(libs.androidx.espresso.core)
