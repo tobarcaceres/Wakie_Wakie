@@ -42,6 +42,10 @@ import kotlin.math.hypot
 import androidx.core.net.toUri
 import cl.frn.wakiewakie.DrowsinessState
 import cl.frn.wakiewakie.DrowsinessLogger
+import android.content.Context
+import android.widget.Toast
+import android.widget.Button
+import android.graphics.Color
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
@@ -62,14 +66,14 @@ class HomeFragment : Fragment() {
     // thresholds - ajustar según pruebas
     // EAR threshold is adjustable at runtime via the SeekBar
     private var EAR_THRESHOLD = 0.20f           // ojo "abierto" si EAR > threshold
-    private val EAR_CLOSED_MS = 1200L           // si ojos cerrados por más de 1.2s => somnolencia
+    private val EAR_CLOSED_MS = 1500L           // aumentado: si ojos cerrados por más de 1.5s => somnolencia (time-based)
     private val EAR_EYE_CLOSED_MS = 300L        // estado ojos cerrados intermedio
     private var MAR_THRESHOLD = 0.40f           // boca abierta (bostezo)
     private val MAR_YAWN_MS = 400L              // duración para considerar un bostezo
 
     // Contadores por frames
     private var consecutiveClosedFrames = 0
-    private val CLOSED_FRAMES_THRESHOLD = 24    // número de frames consecutivos para considerar dormido
+    private val CLOSED_FRAMES_THRESHOLD = 36    // aumentado: más frames consecutivos para considerar dormido (reduce falsos positivos)
     private var asleepFrameCount = 0
     private var asleepLocked = false
     // Para desbloquear cuando la persona despierte
@@ -83,6 +87,21 @@ class HomeFragment : Fragment() {
     private var toneGenerator: ToneGenerator? = null
     private var beepExecutor: ScheduledExecutorService? = null
     private var beepFuture: ScheduledFuture<*>? = null
+
+    // Persistencia
+    private val PREFS_NAME = "wakie_prefs"
+    private val PREF_EAR_THRESHOLD = "ear_threshold"
+    private val PREF_MAR_THRESHOLD = "mar_threshold"
+
+    // Calibración
+    private var isCalibrating = false
+    private val calibrationEars = ArrayList<Float>()
+    private val calibrationMars = ArrayList<Float>()
+    private var calibrationEndTime = 0L
+    private val CALIBRATION_MS = 3000L // duración de calibración en ms
+
+    // Referencia al botón creado programáticamente
+    private var programmaticCalibrateButton: Button? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -98,6 +117,9 @@ class HomeFragment : Fragment() {
         initFaceLandmarker()
         requestCameraPermission()
 
+        // Cargar valores guardados (si existen) antes de configurar el SeekBar
+        loadThresholdsFromPrefs()
+
         // Configuración del SeekBar para ajustar el umbral EAR dinámicamente
         // Rango deseado: 0.0100 .. 0.2000 con resolución 0.0001
         val MIN_EAR = 0.01f
@@ -111,10 +133,67 @@ class HomeFragment : Fragment() {
             override fun onProgressChanged(seekBar: android.widget.SeekBar?, progress: Int, fromUser: Boolean) {
                 EAR_THRESHOLD = MIN_EAR + progress / SCALE
                 binding.textEyeThreshold.text = "Umbral EAR: %.4f".format(EAR_THRESHOLD)
+                // Guardar cambio manual inmediatamente
+                saveThresholdsToPrefs()
             }
             override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {}
         })
+
+        // --- Reemplazamos la búsqueda por id por un botón creado programáticamente ---
+        // Creamos un botón grande y visible en la parte superior del fragment
+        val rootGroup = binding.root as ViewGroup
+        programmaticCalibrateButton = Button(requireContext()).apply {
+            id = View.generateViewId()
+            text = "Calibrar ojos y boca"
+            setTextColor(Color.WHITE)
+            textSize = 16f
+            setPadding(30, 24, 30, 24)
+            setBackgroundColor(Color.parseColor("#E64A19")) // color naranja oscuro visible
+            // hacer *match parent* en ancho para que sea claramente visible
+            layoutParams = ViewGroup.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+            isAllCaps = false
+        }
+        // Añadir como primer hijo para que quede arriba y visible
+        try {
+            rootGroup.addView(programmaticCalibrateButton, 0)
+        } catch (e: Exception) {
+            // Si no se puede insertar en la posición 0, añadir al final como fallback
+            try { rootGroup.addView(programmaticCalibrateButton) } catch (_: Exception) {}
+        }
+
+        programmaticCalibrateButton?.setOnClickListener {
+            if (isCalibrating) {
+                Toast.makeText(requireContext(), "Calibración ya en curso...", Toast.LENGTH_SHORT).show()
+                return@setOnClickListener
+            }
+            startCalibration()
+        }
+
+        // Buscamos el botón de calibrar de forma segura; si no existe, usamos un fallback sobre textHome
+        val btnId = resources.getIdentifier("buttonCalibrate", "id", requireContext().packageName)
+        val btnCalibrate = if (btnId != 0) binding.root.findViewById<Button?>(btnId) else null
+
+        if (btnCalibrate != null) {
+            btnCalibrate.setOnClickListener {
+                if (isCalibrating) {
+                    Toast.makeText(requireContext(), "Calibración ya en curso...", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                startCalibration()
+            }
+        } else {
+            // Fallback leve: permitir iniciar calibración tocando el estado (útil mientras no se agregue el botón al layout)
+            binding.textHome.setOnClickListener {
+                if (isCalibrating) {
+                    Toast.makeText(requireContext(), "Calibración ya en curso...", Toast.LENGTH_SHORT).show()
+                    return@setOnClickListener
+                }
+                Toast.makeText(requireContext(), "Botón 'buttonCalibrate' no encontrado. Iniciando calibración vía texto.", Toast.LENGTH_SHORT).show()
+                startCalibration()
+            }
+        }
+
         return binding.root
     }
 
@@ -128,6 +207,45 @@ class HomeFragment : Fragment() {
                 val ear = computeEAR(landmarks)
                 val mar = computeMAR(landmarks)
                 val now = System.currentTimeMillis()
+
+                // --- Manejo de calibración: recolectar muestras mientras isCalibrating ---
+                if (isCalibrating) {
+                    calibrationEars.add(ear)
+                    calibrationMars.add(mar)
+                    // si llegó el tiempo, finalizar calibración
+                    if (now >= calibrationEndTime) {
+                        // calcular promedios (en camera thread) y aplicar heurística simple
+                        val avgEar = if (calibrationEars.isNotEmpty()) calibrationEars.average().toFloat() else ear
+                        val avgMar = if (calibrationMars.isNotEmpty()) calibrationMars.average().toFloat() else mar
+
+                        // Heurística para thresholds (ajustable):
+                        // EAR_THRESHOLD: un porcentaje del EAR en ojos abiertos (p. ej. 80%)
+                        // MAR_THRESHOLD: algo mayor que MAR en reposo (p. ej. 1.5x) para detectar bostezos
+                        val newEarThreshold = (avgEar * 0.8f).coerceIn(0.01f, 0.2f)
+                        val newMarThreshold = (avgMar * 1.6f + 0.02f).coerceAtLeast(0.05f)
+
+                        EAR_THRESHOLD = newEarThreshold
+                        MAR_THRESHOLD = newMarThreshold
+
+                        // persistir y actualizar UI en hilo principal
+                        activity?.runOnUiThread {
+                            // actualizar SeekBar
+                            val MIN_EAR = 0.01f
+                            val SCALE = 10000f
+                            binding.seekBarEyeThreshold.progress = ((EAR_THRESHOLD - MIN_EAR) * SCALE).toInt()
+                            binding.textEyeThreshold.text = "Umbral EAR: %.4f | EAR_prom: %.3f | MAR_prom: %.3f".format(EAR_THRESHOLD, avgEar, avgMar)
+                            programmaticCalibrateButton?.text = "Calibrar"
+                            Toast.makeText(requireContext(), "Calibración completada", Toast.LENGTH_SHORT).show()
+                        }
+                        saveThresholdsToPrefs()
+                        // limpiar estado
+                        isCalibrating = false
+                        calibrationEars.clear()
+                        calibrationMars.clear()
+                    }
+                    // aún en calibración: evitar procesar lógica de somnolencia restante para no interferir
+                    // pero dejamos que el resto del código siga mostrando valores (si lo desea)
+                }
 
                 // actualizar ventanas temporales (por compatibilidad)
                 if (ear < EAR_THRESHOLD) {
@@ -236,7 +354,7 @@ class HomeFragment : Fragment() {
                 // Si no está bloqueado y no acabamos de entrar en ASLEEP por frames, actualizamos estados normales
                 if (!asleepLocked) {
                     val newState = when {
-                        // time-based fallback
+                        // time-based fallback: marcar ASLEEP *pero NO iniciar la alarma desde aquí*
                         closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_CLOSED_MS -> DrowsinessState.ASLEEP
                         closedWindow.isNotEmpty() && now - (closedWindow.firstOrNull() ?: now) >= EAR_EYE_CLOSED_MS -> DrowsinessState.EYES_CLOSED
                         yawnWindow.isNotEmpty() && now - (yawnWindow.firstOrNull() ?: now) <= MAR_YAWN_MS -> DrowsinessState.YAWNING
@@ -254,18 +372,22 @@ class HomeFragment : Fragment() {
                                 when (currentState) {
                                     DrowsinessState.AWAKE -> {
                                         binding.textHome.text = "Despierto"
-                                        stopAlarm()
+                                        stopAlarm() // detener alarma solo aquí o desde el unlock por frames
                                     }
                                     DrowsinessState.EYES_CLOSED -> {
                                         binding.textHome.text = "Ojos cerrados (breve)"
+                                        // NO iniciar alarma
                                     }
                                     DrowsinessState.YAWNING -> {
                                         binding.textHome.text = "Bostezo detectado"
+                                        // NO iniciar alarma
                                     }
                                     DrowsinessState.ASLEEP -> {
-                                        // note: frames-based ASLEEP handled above; keep fallback
+                                        // Nota: no iniciamos la alarma desde la comprobación time-based.
+                                        // La alarma seguirá iniciándose únicamente desde la lógica por frames (asleepLocked),
+                                        // que es una confirmación más robusta y evita sonidos por cierres breves.
                                         binding.textHome.text = "Dormido / Somnolencia profunda"
-                                        startAlarm()
+                                        // NO startAlarm() aquí
                                     }
                                 }
                             }
@@ -493,5 +615,47 @@ class HomeFragment : Fragment() {
 
     fun getEntriesForState(state: DrowsinessState): List<cl.frn.wakiewakie.DrowsinessLogEntry> {
         return drowsinessLogger.getEntriesForState(state)
+    }
+
+    // Nuevos métodos: persistencia de umbrales
+    private fun saveThresholdsToPrefs() {
+        try {
+            val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            prefs.edit()
+                .putFloat(PREF_EAR_THRESHOLD, EAR_THRESHOLD)
+                .putFloat(PREF_MAR_THRESHOLD, MAR_THRESHOLD)
+                .apply()
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    private fun loadThresholdsFromPrefs() {
+        try {
+            val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val storedEar = prefs.getFloat(PREF_EAR_THRESHOLD, EAR_THRESHOLD)
+            val storedMar = prefs.getFloat(PREF_MAR_THRESHOLD, MAR_THRESHOLD)
+            EAR_THRESHOLD = storedEar
+            MAR_THRESHOLD = storedMar
+        } catch (e: Exception) {
+            // ignore
+        }
+    }
+
+    // Nueva función para centralizar el inicio de calibración
+    private fun startCalibration() {
+        isCalibrating = true
+        calibrationEars.clear()
+        calibrationMars.clear()
+        calibrationEndTime = System.currentTimeMillis() + CALIBRATION_MS
+        // Actualizar UI en hilo principal
+        activity?.runOnUiThread {
+            _binding?.let { binding ->
+                binding.textHome.text = "Calibrando: mantén ojos abiertos y boca cerrada..."
+            }
+            programmaticCalibrateButton?.text = "Calibrando..."
+            Toast.makeText(requireContext(), "Calibrando durante ${CALIBRATION_MS/1000} s", Toast.LENGTH_SHORT).show()
+        }
+        // La recolección de muestras ocurre en onFaceResult
     }
 }
