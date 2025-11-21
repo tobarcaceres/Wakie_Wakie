@@ -14,6 +14,19 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent" />
+    
+    <ImageButton
+        android:id="@+id/btn_settings"
+        android:layout_width="48dp"
+        android:layout_height="48dp"
+        android:layout_marginEnd="24dp"
+        android:layout_marginBottom="80dp"
+        android:background="?attr/selectableItemBackgroundBorderless"
+        android:src="@drawable/ic_settings"
+        android:contentDescription="Configuración"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:tint="#FFFFFF" />
 
     <TextView
         android:id="@+id/text_home"
@@ -24,34 +37,65 @@
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintTop_toTopOf="parent"
+        android:layout_marginBottom="80dp"
         android:background="#AA000000"
         android:textColor="#FFFFFF"
         android:padding="16dp"
         android:text="Detectando somnolencia..." />
 
-    <SeekBar
-        android:id="@+id/seekBarEyeThreshold"
-        android:layout_width="0dp"
+    <androidx.constraintlayout.widget.ConstraintLayout
+        android:id="@+id/layout_thresholds"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:max="100"
-        android:progress="5"
+        android:visibility="gone"
         app:layout_constraintBottom_toTopOf="@id/text_home"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginBottom="16dp" />
+        android:background="#88000000"
+        android:padding="8dp"
+        android:layout_marginBottom="16dp">
+
+        <TextView
+            android:id="@+id/textEyeThreshold"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="Umbral ojo abierto: 0.05"
+            android:textColor="#FFFFFF"
+            app:layout_constraintBottom_toTopOf="@id/seekBarEyeThreshold"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent"
+            android:layout_marginBottom="8dp" />
+
+        <SeekBar
+            android:id="@+id/seekBarEyeThreshold"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:max="100"
+            android:progress="5"
+            app:layout_constraintBottom_toBottomOf="parent"
+            app:layout_constraintStart_toStartOf="parent"
+            app:layout_constraintEnd_toEndOf="parent" />
+            
+    </androidx.constraintlayout.widget.ConstraintLayout>
 
     <TextView
-        android:id="@+id/textEyeThreshold"
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="Umbral ojo abierto: 0.05"
-        app:layout_constraintBottom_toTopOf="@id/seekBarEyeThreshold"
+        android:id="@+id/text_volume_warning"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:text="⚠️\n\nRecuerda subir el volumen al MÁXIMO"
+        android:textColor="#FF0000"
+        android:textSize="30sp"
+        android:textStyle="bold"
+        android:gravity="center"
+        android:background="#FA000000"
+        android:padding="32dp"
+        android:visibility="gone"
+        android:elevation="100dp"
+        android:clickable="true"
+        android:focusable="true"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
-        app:layout_constraintEnd_toEndOf="parent"
-        android:layout_marginBottom="8dp"
-        android:textColor="#FFFFFF"
-        android:background="#AA000000"
-        android:padding="8dp" />
+        app:layout_constraintEnd_toEndOf="parent" />
 
 </androidx.constraintlayout.widget.ConstraintLayout>

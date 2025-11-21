@@ -46,6 +46,10 @@ import android.content.Context
 import android.widget.Toast
 import android.widget.Button
 import android.graphics.Color
+import android.content.BroadcastReceiver
+import android.content.Intent
+import android.content.IntentFilter
+import android.net.Uri
 
 class HomeFragment : Fragment() {
     private var _binding: FragmentHomeBinding? = null
@@ -92,6 +96,7 @@ class HomeFragment : Fragment() {
     private val PREFS_NAME = "wakie_prefs"
     private val PREF_EAR_THRESHOLD = "ear_threshold"
     private val PREF_MAR_THRESHOLD = "mar_threshold"
+    private val PREF_ALARM_URI = "alarm_uri" // Nuevo: Clave para URI de alarma personalizada
 
     // Calibración
     private var isCalibrating = false
@@ -102,6 +107,9 @@ class HomeFragment : Fragment() {
 
     // Referencia al botón creado programáticamente
     private var programmaticCalibrateButton: Button? = null
+
+    // Volume monitoring
+    private var volumeReceiver: BroadcastReceiver? = null
 
     override fun onCreateView(
         inflater: LayoutInflater,
@@ -139,6 +147,15 @@ class HomeFragment : Fragment() {
             override fun onStartTrackingTouch(seekBar: android.widget.SeekBar?) {}
             override fun onStopTrackingTouch(seekBar: android.widget.SeekBar?) {}
         })
+
+        // Botón de configuración (tuerca)
+        binding.btnSettings.setOnClickListener {
+            if (binding.layoutThresholds.visibility == View.VISIBLE) {
+                binding.layoutThresholds.visibility = View.GONE
+            } else {
+                binding.layoutThresholds.visibility = View.VISIBLE
+            }
+        }
 
         // --- Reemplazamos la búsqueda por id por un botón creado programáticamente ---
         // Creamos un botón grande y visible en la parte superior del fragment
@@ -195,6 +212,57 @@ class HomeFragment : Fragment() {
         }
 
         return binding.root
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // Forzar que los botones de volumen controlen el volumen de la alarma
+        requireActivity().volumeControlStream = AudioManager.STREAM_ALARM
+        checkVolume()
+        registerVolumeReceiver()
+    }
+
+    override fun onPause() {
+        super.onPause()
+        // Restaurar comportamiento por defecto
+        requireActivity().volumeControlStream = AudioManager.USE_DEFAULT_STREAM_TYPE
+        unregisterVolumeReceiver()
+    }
+
+    private fun checkVolume() {
+        val audioManager = requireContext().getSystemService(Context.AUDIO_SERVICE) as AudioManager
+        // Verificar volumen de alarma, ya que es el que usa la app para despertar
+        val currentVolume = audioManager.getStreamVolume(AudioManager.STREAM_ALARM)
+        val maxVolume = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM)
+        
+        if (currentVolume < maxVolume) {
+            binding.textVolumeWarning.visibility = View.VISIBLE
+        } else {
+            binding.textVolumeWarning.visibility = View.GONE
+        }
+    }
+
+    private fun registerVolumeReceiver() {
+        volumeReceiver = object : BroadcastReceiver() {
+            override fun onReceive(context: Context?, intent: Intent?) {
+                if (intent?.action == "android.media.VOLUME_CHANGED_ACTION") {
+                    checkVolume()
+                }
+            }
+        }
+        val filter = IntentFilter("android.media.VOLUME_CHANGED_ACTION")
+        requireContext().registerReceiver(volumeReceiver, filter)
+    }
+
+    private fun unregisterVolumeReceiver() {
+        volumeReceiver?.let {
+            try {
+                requireContext().unregisterReceiver(it)
+            } catch (e: Exception) {
+                // ignore
+            }
+        }
+        volumeReceiver = null
     }
 
     private val onFaceResult: (FaceLandmarkerResult, MPImage) -> Unit = { result, inputImage ->
@@ -461,7 +529,43 @@ class HomeFragment : Fragment() {
     private fun startAlarm() {
         if (isAlarmPlaying) return
         try {
-            // Prefer MediaPlayer con AudioAttributes
+            // --- NUEVO: Comprobación de URI personalizada ---
+            val prefs = requireContext().getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+            val uriString = prefs.getString(PREF_ALARM_URI, null)
+            
+            if (uriString != null) {
+                try {
+                    val uri = Uri.parse(uriString)
+                    mediaPlayer = MediaPlayer().apply {
+                        setAudioAttributes(
+                            AudioAttributes.Builder()
+                                .setUsage(AudioAttributes.USAGE_ALARM)
+                                .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                                .build()
+                        )
+                        // Verificar y configurar permiso antes de setDataSource
+                        try {
+                            requireContext().contentResolver.takePersistableUriPermission(
+                                uri, Intent.FLAG_GRANT_READ_URI_PERMISSION
+                            )
+                        } catch (e: Exception) {
+                            // ignore, might already have permission or it's not needed
+                        }
+                        
+                        setDataSource(requireContext(), uri)
+                        isLooping = true
+                        prepare()
+                        start()
+                    }
+                    isAlarmPlaying = true
+                    return
+                } catch (e: Exception) {
+                    // Fallback to default alarm
+                    e.printStackTrace()
+                }
+            }
+            
+            // Prefer MediaPlayer con AudioAttributes (Default)
             val resId = resources.getIdentifier("alarm", "raw", requireContext().packageName)
             if (resId != 0) {
                 mediaPlayer = MediaPlayer().apply {
